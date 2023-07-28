@@ -20,4 +20,10 @@ export class SocketDb {
     })
     socket: string;
 
+    @Column({
+        nullable: true,
+        default: ''
+    })
+    rooms: string;
+
 }

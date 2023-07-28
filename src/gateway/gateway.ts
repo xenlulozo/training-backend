@@ -12,6 +12,7 @@ import Redis from 'ioredis';
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import { Message } from '../message/entities/message.entity';
 import { ElasticsearchService } from '@nestjs/elasticsearch';
+import { JwtService } from '@nestjs/jwt';
 
 @WebSocketGateway()
 export class MyGateway implements OnModuleInit {
@@ -26,6 +27,8 @@ export class MyGateway implements OnModuleInit {
         private converRepository: Repository<Conversation>,
         @InjectRepository(Message)
         private messageRepository: Repository<Message>,
+        private jwtService: JwtService
+
     ) { }
     @WebSocketServer()
     server: Server;
@@ -36,33 +39,56 @@ export class MyGateway implements OnModuleInit {
         // })
     }
 
-
-    async handleConnection(client: Socket) {
-        console.log(`Client ${client.id} connected.`);
+    @SubscribeMessage('join')
+    async onJoin(@MessageBody() data: string, @ConnectedSocket() client: Socket) {
         const conversationId = client.handshake.query.conversation_id;
         try {
             const socket = await this.socketRepository.findOne({ where: { user_id: client.handshake.query.user_id.toString() } })
             if (socket) {
                 socket.socket = client.id
+                socket.rooms = conversationId.toString()
                 await this.socketRepository.save(socket)
                 await this.redis.set(client.handshake.query.user_id.toString(), JSON.stringify(socket))
+                await this.redis.set("rooms", client.handshake.query.conversation_id.toString())
+
             } else {
                 const newClient = new SocketDb()
                 newClient.socket = client.id;
                 newClient.user_id = client.handshake.query.user_id.toString();
+                newClient.rooms = conversationId.toString()
+
                 await this.socketRepository.save(newClient)
                 await this.redis.set(client.handshake.query.user_id.toString(), JSON.stringify(socket))
+                await this.redis.set("rooms", client.handshake.query.conversation_id.toString())
+
+
             }
 
         } catch (error) {
             console.log(error)
         }
         client.join(conversationId);
-        console.log(client.rooms)
+    }
+    async handleConnection(client: Socket) {
+        console.log(`Client ${client.id} connected.`);
 
-        // this.updateRoomCount(conversationId.toString());
+        try {
 
-        console.log(`Client ${client.id} joined room: ${conversationId}`);
+            const token = await client.handshake.query.token
+            if (!token)
+                return
+            const access_token = await this.jwtService.decode(token.toString());
+            console.log(access_token)
+            if (!access_token)
+                return
+
+
+            await this.redis.set("user_id", access_token?.sub)
+            // log(await this.redis.get("user_id"))
+
+        } catch (error) {
+            return
+        }
 
         this.broadcastStatus();
     }
@@ -95,14 +121,18 @@ export class MyGateway implements OnModuleInit {
     }
     @SubscribeMessage('events')
     async handleEvent(@ConnectedSocket() client: Socket, @MessageBody() data: string): Promise<string> {
+
         try {
+            const userId = await this.redis.get("user_id")
+            const rooms = await this.redis.get("rooms")
+            // log(rooms)
             const tmp = JSON.parse(data)
             // const cl = await this.socketRepository.findOne({ where: { user_id: tmp.to.toString() } })
             const cl = JSON.parse(await this.redis.get(tmp.to.toString()));
             const conver = await this.converRepository.findOne({ where: { conversation_id: Number(client.handshake.query.conversation_id) } })
-
-            if (conver?.member.includes(tmp?.to)) {
-
+            // 
+            if (conver?.member.includes(Number(tmp?.to))) {
+                log("in room")
                 if (this.isClientInRoom(cl.socket, client.handshake.query.conversation_id.toString())) {
 
                     const mes = new Message();
@@ -117,12 +147,15 @@ export class MyGateway implements OnModuleInit {
                     })
 
                     log(client?.handshake?.query?.conversation_id, client.handshake?.query?.user_id, tmp?.message)
-                    this.server.emit('events', { content: JSON.parse(data) });
+                    this.server.to(rooms).emit('events', { content: JSON.parse(data) });
                 }
                 else {
+                    log("not in room")
+
                     if (!cl)
                         return `user not found`
                     if (cl.socket) {
+
                         log(client?.handshake?.query?.conversation_id, client.handshake?.query?.user_id, tmp?.message)
 
                         const mes = new Message();
@@ -135,7 +168,7 @@ export class MyGateway implements OnModuleInit {
                             index: 'message',
                             document: { ...mes },
                         })
-                        this.server.emit('events', { "from client": { content: JSON.parse(data) } });
+                        this.server.to(cl.socket).emit('events', { "from client": { content: JSON.parse(data) } });
                     }
                 }
             }
