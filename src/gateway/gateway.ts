@@ -3,7 +3,7 @@ import { Server, Socket } from 'socket.io';
 import { ConnectedSocket, MessageBody, SubscribeMessage, WebSocketGateway, WebSocketServer } from "@nestjs/websockets";
 import { OnModuleInit } from '@nestjs/common';
 import { SocketDb } from './socket.entity';
-import { Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { log } from 'console';
 import { Conversation } from '../conversation/entities/conversation.entity';
@@ -13,6 +13,7 @@ import { InjectRedis } from '@nestjs-modules/ioredis';
 import { Message } from '../message/entities/message.entity';
 import { ElasticsearchService } from '@nestjs/elasticsearch';
 import { JwtService } from '@nestjs/jwt';
+import { async } from 'rxjs';
 
 @WebSocketGateway()
 export class MyGateway implements OnModuleInit {
@@ -42,27 +43,37 @@ export class MyGateway implements OnModuleInit {
     @SubscribeMessage('join')
     async onJoin(@MessageBody() data: string, @ConnectedSocket() client: Socket) {
         const conversationId = client.handshake.query.conversation_id;
+        const user_id = client.handshake.query.user_id;
+
+        // save member in conversation
+        await this.redis.set(`member_conversation_${client.handshake.query.conversation_id.toString()}`, JSON.stringify((await this.converRepository.findOne({ where: { conversation_id: Number(conversationId) } })).member))
+
         try {
             const socket = await this.socketRepository.findOne({ where: { user_id: client.handshake.query.user_id.toString() } })
-            if (socket) {
-                socket.socket = client.id
-                socket.rooms = conversationId.toString()
-                await this.socketRepository.save(socket)
-                await this.redis.set(client.handshake.query.user_id.toString(), JSON.stringify(socket))
-                await this.redis.set("rooms", client.handshake.query.conversation_id.toString())
+            // if (socket) {
+            socket.socket = client.id
+            socket.rooms = conversationId.toString()
+            await this.socketRepository.save(socket)
+            //save table socket
+            await this.redis.set(client.handshake.query.user_id.toString(), JSON.stringify(socket))
+            log(socket)
+            //save conversation_id
+            await this.redis.set(client.handshake.query.conversation_id.toString(), client.handshake.query.conversation_id.toString())
 
-            } else {
-                const newClient = new SocketDb()
-                newClient.socket = client.id;
-                newClient.user_id = client.handshake.query.user_id.toString();
-                newClient.rooms = conversationId.toString()
+            // } else {
+            //     const newClient = new SocketDb()
+            //     newClient.socket = client.id;
+            //     newClient.user_id = client.handshake.query.user_id.toString();
+            //     newClient.rooms = conversationId.toString()
 
-                await this.socketRepository.save(newClient)
-                await this.redis.set(client.handshake.query.user_id.toString(), JSON.stringify(socket))
-                await this.redis.set("rooms", client.handshake.query.conversation_id.toString())
+            //     await this.socketRepository.save(newClient)
+            //     //save table socket
 
+            //     await this.redis.set(client.handshake.query.user_id.toString(), JSON.stringify(socket))
+            //     //save conversation_id
 
-            }
+            //     await this.redis.set(client.handshake.query.conversation_id.toString(), client.handshake.query.conversation_id.toString())
+            // }
 
         } catch (error) {
             console.log(error)
@@ -78,12 +89,18 @@ export class MyGateway implements OnModuleInit {
             if (!token)
                 return
             const access_token = await this.jwtService.decode(token.toString());
-            console.log(access_token)
+            // console.log(access_token)
             if (!access_token)
                 return
 
+            //save user_id
+            const newClient = new SocketDb()
+            newClient.socket = client.id;
+            newClient.user_id = client.handshake.query.user_id.toString();
+            newClient.rooms = "0";
 
-            await this.redis.set("user_id", access_token?.sub)
+            await this.socketRepository.save(newClient)
+            await this.redis.set(`user_id_${client.handshake.query.user_id.toString()}`, access_token?.sub)
             // log(await this.redis.get("user_id"))
 
         } catch (error) {
@@ -122,61 +139,157 @@ export class MyGateway implements OnModuleInit {
     @SubscribeMessage('events')
     async handleEvent(@ConnectedSocket() client: Socket, @MessageBody() data: string): Promise<string> {
 
+        const userExistsInMemberArray = await this.converRepository
+            .createQueryBuilder('conversation')
+            .where(':userId = ANY(conversation.member)', { userId: client.handshake.query.user_id.toString() })
+            .getCount();
+
+        log("sos", userExistsInMemberArray)
+        if (!userExistsInMemberArray)
+            return `user not exist in conversation`
+        if (!await this.redis.get(client.handshake.query.user_id.toString()))
+            return `huh`
         try {
-            const userId = await this.redis.get("user_id")
-            const rooms = await this.redis.get("rooms")
-            // log(rooms)
-            const tmp = JSON.parse(data)
-            // const cl = await this.socketRepository.findOne({ where: { user_id: tmp.to.toString() } })
-            const cl = JSON.parse(await this.redis.get(tmp.to.toString()));
-            const conver = await this.converRepository.findOne({ where: { conversation_id: Number(client.handshake.query.conversation_id) } })
+            const userId = await this.redis.get(`user_id_${client.handshake.query.user_id.toString()}`)
+            log(userId)
+            const rooms = await this.redis.get(client.handshake.query.conversation_id.toString())
+            log(rooms)
+            const socketId = JSON.parse(await this.redis.get(client.handshake.query.user_id.toString())).socket
+            log(socketId)
+            let memberInConver = JSON.parse(await this.redis.get(`member_conversation_${client.handshake.query.conversation_id.toString()}`))
+            log(memberInConver)
+
+            if (!memberInConver)
+                memberInConver = (await this.converRepository.findOne({ where: { conversation_id: Number(client.handshake.query.conversation_id) } })).member
+            const checkMember = await this.socketRepository.find({ where: { user_id: In(memberInConver), rooms: Not(client.handshake.query.conversation_id.toString()) } })
+            //emit rooms
+            console.log(checkMember)
+            this.server.to(rooms).emit('events', data);
+            const mes = new Message();
+            mes.conversation_id = Number(client.handshake.query.conversation_id)
+            mes.user_id = Number(client.handshake.query.user_id)
+            mes.message = data
+
+            await this.messageRepository.save(mes)
+            await this.elSearchService.index({
+                index: 'message',
+                document: { ...mes },
+            })
+            //inside
+
+            checkMember && checkMember.map(async (item) => {
+                log("go", item.socket)
+                const mes = new Message();
+                mes.conversation_id = Number(client.handshake.query.conversation_id)
+                mes.user_id = Number(item.user_id)
+                mes.message = data
+
+                await this.messageRepository.save(mes)
+                await this.elSearchService.index({
+                    index: 'message',
+                    document: { ...mes },
+                })
+                this.server.to(item.socket).emit('events', data);
+                // }
+            })
+
+            /////
+            // if (conver?.member.includes(Number(tmp?.to))) {
+            //     log("in room")
+            //     if (this.isClientInRoom(cl.socket, client.handshake.query.conversation_id.toString())) {
+
+            //         const mes = new Message();
+            //         mes.conversation_id = Number(client.handshake.query.conversation_id)
+            //         mes.user_id = Number(client.handshake.query.user_id)
+            //         mes.message = tmp?.message
+
+            //         await this.messageRepository.save(mes)
+            //         await this.elSearchService.index({
+            //             index: 'message',
+            //             document: { ...mes },
+            //         })
+
+            //         log(client?.handshake?.query?.conversation_id, client.handshake?.query?.user_id, tmp?.message)
+            //         this.server.to(rooms).emit('events', { content: JSON.parse(data) });
+            //     }
+            //     else {
+            //         log("not in room")
+
+            //         if (!cl)
+            //             return `user not found`
+            //         if (cl.socket) {
+
+            //             log(client?.handshake?.query?.conversation_id, client.handshake?.query?.user_id, tmp?.message)
+
+            //             const mes = new Message();
+            //             mes.conversation_id = Number(client.handshake.query.conversation_id)
+            //             mes.user_id = Number(client.handshake.query.user_id)
+            //             mes.message = tmp?.message
+
+            //             await this.messageRepository.save(mes)
+            //             await this.elSearchService.index({
+            //                 index: 'message',
+            //                 document: { ...mes },
+            //             })
+            //             this.server.to(cl.socket).emit('events', { "from client": { content: JSON.parse(data) } });
+            //         }
+            //     }
+            // }
+            // else
+            //     console.log("Client is not a member of the conversation.");
+
+
+
+            // const tmp = JSON.parse(data)
+            // // const cl = await this.socketRepository.findOne({ where: { user_id: tmp.to.toString() } })
+            // const cl = JSON.parse(await this.redis.get(tmp.to.toString()));
             // 
-            if (conver?.member.includes(Number(tmp?.to))) {
-                log("in room")
-                if (this.isClientInRoom(cl.socket, client.handshake.query.conversation_id.toString())) {
+            // if (conver?.member.includes(Number(tmp?.to))) {
+            //     log("in room")
+            //     if (this.isClientInRoom(cl.socket, client.handshake.query.conversation_id.toString())) {
 
-                    const mes = new Message();
-                    mes.conversation_id = Number(client.handshake.query.conversation_id)
-                    mes.user_id = Number(client.handshake.query.user_id)
-                    mes.message = tmp?.message
+            //         const mes = new Message();
+            //         mes.conversation_id = Number(client.handshake.query.conversation_id)
+            //         mes.user_id = Number(client.handshake.query.user_id)
+            //         mes.message = tmp?.message
 
-                    await this.messageRepository.save(mes)
-                    await this.elSearchService.index({
-                        index: 'message',
-                        document: { ...mes },
-                    })
+            //         await this.messageRepository.save(mes)
+            //         await this.elSearchService.index({
+            //             index: 'message',
+            //             document: { ...mes },
+            //         })
 
-                    log(client?.handshake?.query?.conversation_id, client.handshake?.query?.user_id, tmp?.message)
-                    this.server.to(rooms).emit('events', { content: JSON.parse(data) });
-                }
-                else {
-                    log("not in room")
+            //         log(client?.handshake?.query?.conversation_id, client.handshake?.query?.user_id, tmp?.message)
+            //         this.server.to(rooms).emit('events', { content: JSON.parse(data) });
+            //     }
+            //     else {
+            //         log("not in room")
 
-                    if (!cl)
-                        return `user not found`
-                    if (cl.socket) {
+            //         if (!cl)
+            //             return `user not found`
+            //         if (cl.socket) {
 
-                        log(client?.handshake?.query?.conversation_id, client.handshake?.query?.user_id, tmp?.message)
+            //             log(client?.handshake?.query?.conversation_id, client.handshake?.query?.user_id, tmp?.message)
 
-                        const mes = new Message();
-                        mes.conversation_id = Number(client.handshake.query.conversation_id)
-                        mes.user_id = Number(client.handshake.query.user_id)
-                        mes.message = tmp?.message
+            //             const mes = new Message();
+            //             mes.conversation_id = Number(client.handshake.query.conversation_id)
+            //             mes.user_id = Number(client.handshake.query.user_id)
+            //             mes.message = tmp?.message
 
-                        await this.messageRepository.save(mes)
-                        await this.elSearchService.index({
-                            index: 'message',
-                            document: { ...mes },
-                        })
-                        this.server.to(cl.socket).emit('events', { "from client": { content: JSON.parse(data) } });
-                    }
-                }
-            }
-            else
-                console.log("Client is not a member of the conversation.");
+            //             await this.messageRepository.save(mes)
+            //             await this.elSearchService.index({
+            //                 index: 'message',
+            //                 document: { ...mes },
+            //             })
+            //             this.server.to(cl.socket).emit('events', { "from client": { content: JSON.parse(data) } });
+            //         }
+            //     }
+            // }
+            // else
+            //     console.log("Client is not a member of the conversation.");
 
         } catch (error) {
-
+            log("catch err")
         }
 
         return data;

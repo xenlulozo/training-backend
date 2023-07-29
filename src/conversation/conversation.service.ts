@@ -5,6 +5,8 @@ import { Repository } from 'typeorm';
 import { User } from 'src/user/entities/user.entity';
 import { Conversation } from './entities/conversation.entity';
 import { JwtService } from '@nestjs/jwt';
+import { log } from 'console';
+import { check } from 'prettier';
 
 @Injectable()
 export class ConversationService {
@@ -30,11 +32,14 @@ export class ConversationService {
     return "ac"
   }
   async create(createConversationDto: CreateConversationDto): Promise<User[] | string> {
+    // log("sh", JSON.parse(createConversationDto.member))
+
     try {
       const conversation = new Conversation();
       if (!createConversationDto.member) {
         return `params invalid`
       }
+
       let type = 0;
       const userIds = JSON.parse(createConversationDto.member)
 
@@ -47,6 +52,26 @@ export class ConversationService {
       if (userIds.length !== userList.length) {
         return `user is not exist`
       }
+
+      const checkConver = await this.conversationRepository
+        .createQueryBuilder('conversation')
+        .select(['conversation.member'])
+        .where('ARRAY[:...userIds]::int[] && conversation.member', { userIds })
+        .getMany();
+
+
+      // console.log("check", checkConver)
+      checkConver && checkConver.map((item) => {
+        // log(this.areArraysEqual(item.member, userIds))
+        if (!this.areArraysEqual(item.member, userIds))
+          type = -1
+      })
+
+      if (type === -1)
+        return `conversation is exist`
+      // if (checkConver.length === userIds)
+      //   return `conversation is exist`
+
       if (userList.length === 2) {
         type = 1;
       }
@@ -65,9 +90,9 @@ export class ConversationService {
       conversation.member = userIds;
       conversation.name = groupName
 
-      await this.conversationRepository.save(conversation)
+      // await this.conversationRepository.save(conversation)
 
-      return userList
+      return `create conversation success`
 
     } catch (error) {
       return error
@@ -75,7 +100,22 @@ export class ConversationService {
 
 
   }
+  areArraysEqual(arr1, arr2) {
+    if (arr1.length !== arr2.length) {
+      return false;
+    }
 
+    const sortedArr1 = arr1.slice().sort();
+    const sortedArr2 = arr2.slice().sort();
+
+    for (let i = 0; i < sortedArr1.length; i++) {
+      if (sortedArr1[i] !== sortedArr2[i]) {
+        return false;
+      }
+    }
+
+    return true;
+  }
   //   async getNameUser(user_id: number): Promise < User[] | false > {
   //   const user = await this.usersRepository.findBy({ user_id })
   //     if(user) {

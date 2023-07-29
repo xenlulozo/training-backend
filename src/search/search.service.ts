@@ -64,7 +64,9 @@ export class SearchService {
       'query': {
         "bool": {
           "must": {
-            match_all: {}
+            match: {
+              "conversation_id": 16
+            }
           }
         }
       }
@@ -76,7 +78,9 @@ export class SearchService {
       'query': {
         "bool": {
           "must": {
-            match_all: {}
+            match: {
+              "conversation_id": 16
+            }
           }
         }
       }
